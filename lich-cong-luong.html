@@ -366,6 +366,9 @@ select.mini,input.mini{
 .mc-g button.sel{background:var(--accent-soft); color:var(--accent-ink); font-weight:600}
 .mc-g button.today{background:var(--accent); color:#fff; font-weight:600}
 .mc-g button.today.has::after{background:#fff}
+.mc-g button.hol{color:var(--ot); font-weight:600}
+.mc-g button.today.hol{color:#fff}
+.mhol{font-size:10.5px; color:var(--ot); font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-left:2px}
 .mc-tip{margin:9px 1px 0; font-size:11px; line-height:1.5; color:var(--muted)}
 
 .demo-bar{
@@ -942,6 +945,7 @@ function step(dir) {
 }
 
 function render() {
+  holCache = {};
   $("#periodLbl").textContent = periodLabel();
   $("#demoBar").classList.toggle("hide", !COLLS.some(c => state[c].some(x => x.demo)));
   renderSidebar();
@@ -1357,6 +1361,7 @@ function renderMiniCal() {
     const cls = [
       d.getMonth() === first.getMonth() ? "" : "out",
       busy.has(k) ? "has" : "",
+      holidayOn(k) ? "hol" : "",
       sameDay(d, today) ? "today" : (sameDay(d, state.cursor) ? "sel" : ""),
     ].filter(Boolean).join(" ");
     cells += `<button class="${cls}" data-go="${k}">${d.getDate()}</button>`;
@@ -1387,6 +1392,7 @@ function renderMonth() {
         <div class="mnum">${d.getDate()}</div>
         ${h ? `<div class="mh">${fmtH(h)}</div>` : ""}
       </div>
+      ${holidayOn(iso(d)) ? `<div class="mhol">${esc(holidayOn(iso(d)).name)}</div>` : ""}
       ${shown.map(t => `<button class="mchip ${t.overtime ? "ot" : ""}" data-task="${t.id}" style="--c:${coColor(t.companyId)}">
         <b>${t.start}</b><span>${esc(coName(t.companyId))}</span></button>`).join("")}
       ${ts.length > 3 ? `<button class="mmore" data-day="${iso(d)}">+ ${ts.length - 3} nhiệm vụ nữa</button>` : ""}
@@ -1515,7 +1521,127 @@ function monthsBetween(f, t) {
 
 /* ---- loại ngày, giờ đêm, hệ số ---- */
 const PCT = { ot: 1.5, week: 2, hol: 3, night: .3 };   // mức tối thiểu theo luật
-const holidayOn = date => state.holidays.find(h => h.date === date);
+/* ---- âm lịch Việt Nam: thuật toán Hồ Ngọc Đức, múi giờ +7 ---- */
+const Lunar = (() => {
+  const INT = Math.floor, TZ = 7, dr = Math.PI / 180;
+  const jdFromDate = (dd, mm, yy) => {
+    const a = INT((14 - mm) / 12), y = yy + 4800 - a, m = mm + 12 * a - 3;
+    let jd = dd + INT((153 * m + 2) / 5) + 365 * y + INT(y / 4) - INT(y / 100) + INT(y / 400) - 32045;
+    if (jd < 2299161) jd = dd + INT((153 * m + 2) / 5) + 365 * y + INT(y / 4) - 32083;
+    return jd;
+  };
+  const jdToDate = jd => {
+    let b, c;
+    if (jd > 2299160) { const a = jd + 32044; b = INT((4 * a + 3) / 146097); c = a - INT(b * 146097 / 4); }
+    else { b = 0; c = jd + 32082; }
+    const d = INT((4 * c + 3) / 1461), e = c - INT(1461 * d / 4), m = INT((5 * e + 2) / 153);
+    return [e - INT((153 * m + 2) / 5) + 1, m + 3 - 12 * INT(m / 10), b * 100 + d - 4800 + INT(m / 10)];
+  };
+  const newMoon = k => {
+    const T = k / 1236.85, T2 = T * T, T3 = T2 * T;
+    let J = 2415020.75933 + 29.53058868 * k + 0.0001178 * T2 - 0.000000155 * T3;
+    J += 0.00033 * Math.sin((166.56 + 132.87 * T - 0.009173 * T2) * dr);
+    const M = 359.2242 + 29.10535608 * k - 0.0000333 * T2 - 0.00000347 * T3;
+    const Mp = 306.0253 + 385.81691806 * k + 0.0107306 * T2 + 0.00001236 * T3;
+    const F = 21.2964 + 390.67050646 * k - 0.0016528 * T2 - 0.00000239 * T3;
+    let C = (0.1734 - 0.000393 * T) * Math.sin(M * dr) + 0.0021 * Math.sin(2 * dr * M);
+    C += -0.4068 * Math.sin(Mp * dr) + 0.0161 * Math.sin(dr * 2 * Mp) - 0.0004 * Math.sin(dr * 3 * Mp);
+    C += 0.0104 * Math.sin(dr * 2 * F) - 0.0051 * Math.sin(dr * (M + Mp)) - 0.0074 * Math.sin(dr * (M - Mp));
+    C += 0.0004 * Math.sin(dr * (2 * F + M)) - 0.0004 * Math.sin(dr * (2 * F - M)) - 0.0006 * Math.sin(dr * (2 * F + Mp));
+    C += 0.0010 * Math.sin(dr * (2 * F - Mp)) + 0.0005 * Math.sin(dr * (2 * Mp + M));
+    const dt = T < -11 ? 0.001 + 0.000839 * T + 0.0002261 * T2 - 0.00000845 * T3 - 0.000000081 * T * T3
+      : -0.000278 + 0.000265 * T + 0.000262 * T2;
+    return J + C - dt;
+  };
+  const sunLong = jdn => {
+    const T = (jdn - 2451545) / 36525, T2 = T * T;
+    const M = 357.5291 + 35999.0503 * T - 0.0001559 * T2 - 0.00000048 * T * T2;
+    const L0 = 280.46645 + 36000.76983 * T + 0.0003032 * T2;
+    let D = (1.9146 - 0.004817 * T - 0.000014 * T2) * Math.sin(dr * M);
+    D += (0.019993 - 0.000101 * T) * Math.sin(dr * 2 * M) + 0.00029 * Math.sin(dr * 3 * M);
+    const L = (L0 + D) * dr;
+    return L - Math.PI * 2 * INT(L / (Math.PI * 2));
+  };
+  const sunPos = d => INT(sunLong(d - 0.5 - TZ / 24) / Math.PI * 6);
+  const nmDay = k => INT(newMoon(k) + 0.5 + TZ / 24);
+  const month11 = yy => {
+    const k = INT((jdFromDate(31, 12, yy) - 2415021) / 29.530588853);
+    const nm = nmDay(k);
+    return sunPos(nm) >= 9 ? nmDay(k - 1) : nm;
+  };
+  const leapOffset = a11 => {
+    const k = INT((a11 - 2415021.076998695) / 29.530588853 + 0.5);
+    let last, i = 1, arc = sunPos(nmDay(k + i));
+    do { last = arc; i++; arc = sunPos(nmDay(k + i)); } while (arc !== last && i < 14);
+    return i - 1;
+  };
+  // Ngày âm ld tháng lm (tháng thường) của năm âm ly → "YYYY-MM-DD" dương lịch.
+  const toSolar = (ld, lm, ly) => {
+    const a11 = lm < 11 ? month11(ly - 1) : month11(ly);
+    const b11 = lm < 11 ? month11(ly) : month11(ly + 1);
+    const k = INT(0.5 + (a11 - 2415021.076998695) / 29.530588853);
+    let off = lm - 11; if (off < 0) off += 12;
+    if (b11 - a11 > 365 && off >= leapOffset(a11)) off += 1;
+    const [d, m, y] = jdToDate(nmDay(k + off) + ld - 1);
+    return `${y}-${pad(m)}-${pad(d)}`;
+  };
+  return { toSolar };
+})();
+
+/* ---- ngày lễ: quy tắc lặp hằng năm (dương hoặc âm lịch) hoặc một ngày cụ thể ----
+   md: "MM-DD" dương lịch hằng năm · lunar: "MM-DD" âm lịch hằng năm
+   date: "YYYY-MM-DD" một lần · span: số ngày nghỉ · pre: bắt đầu sớm hơn mấy ngày */
+const HOLIDAY_VN = [
+  { md: "01-01", name: "Tết Dương lịch" },
+  { lunar: "01-01", pre: 1, span: 5, name: "Tết Nguyên đán" },
+  { lunar: "03-10", name: "Giỗ Tổ Hùng Vương" },
+  { md: "04-30", name: "Ngày Giải phóng miền Nam" },
+  { md: "05-01", name: "Ngày Quốc tế Lao động" },
+  { md: "09-02", span: 2, name: "Quốc khánh" },
+];
+function holidayDates(h, y) {
+  let start;
+  if (h.date) start = h.date;
+  else if (h.md) start = `${y}-${h.md}`;
+  else if (h.lunar) {
+    const [lm, ld] = h.lunar.split("-").map(Number);
+    start = iso(addDays(parseISO(Lunar.toSolar(ld, lm, y)), -(h.pre || 0)));
+  } else return [];
+  const d0 = parseISO(start);
+  return Array.from({ length: Math.max(1, h.span || 1) }, (_, i) => iso(addDays(d0, i)));
+}
+let holCache = {};   // xoá mỗi lần vẽ lại, vì danh sách ngày lễ có thể vừa đổi
+function holidaysOfYear(y) {
+  if (holCache[y]) return holCache[y];
+  const map = new Map();
+  state.holidays.forEach(h => {
+    // Xét cả năm trước và năm sau vì một kỳ nghỉ có thể vắt qua năm mới.
+    (h.date ? [y] : [y - 1, y, y + 1]).forEach(yy => holidayDates(h, yy).forEach(d => {
+      if (+d.slice(0, 4) === y && !map.has(d)) map.set(d, h);
+    }));
+  });
+  return (holCache[y] = map);
+}
+const holidayOn = date => {
+  if (!date) return null;
+  const h = holidaysOfYear(+date.slice(0, 4)).get(date);
+  return h ? { date, name: h.name || "Ngày lễ", rule: h } : null;
+};
+const holYear = () => state.holYear || state.cursor.getFullYear();
+function holRuleText(h) {
+  const span = (h.span || 1) > 1 ? ` · nghỉ ${h.span} ngày` : "";
+  if (h.lunar) {
+    const [m, d] = h.lunar.split("-").map(Number);
+    return `Hằng năm · ${d}/${m} âm lịch${h.pre ? `, nghỉ từ ${h.pre} ngày trước` : ""}${span}`;
+  }
+  if (h.md) { const [m, d] = h.md.split("-").map(Number); return `Hằng năm · ${d}/${m} dương lịch${span}`; }
+  return `Một lần${span}`;
+}
+function holRangeText(ds) {
+  if (!ds.length) return "";
+  const a = parseISO(ds[0]), b = parseISO(ds[ds.length - 1]);
+  return ds.length === 1 ? dateVN(a) : `${shortVN(a)} – ${shortVN(b)}/${b.getFullYear()}`;
+}
 const DAYNAME = { normal: "Ngày thường", weekend: "Ngày nghỉ tuần", holiday: "Ngày lễ" };
 
 function dayTypeOf(t) {
@@ -1749,23 +1875,40 @@ function renderSettings() {
 
     <div class="card">
       <div class="card-h"><h2>Ngày lễ</h2><div class="spacer"></div>
-        <span class="lbl">${state.holidays.length} ngày</span></div>
+        <div style="display:flex;align-items:center;gap:4px;flex:0 0 auto">
+          <button class="btn icon ghost" data-holyear="-1" aria-label="Năm trước" style="flex:0 0 30px;width:30px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M15 5l-7 7 7 7"/></svg></button>
+          <span class="num" style="font-weight:600;min-width:46px;text-align:center">${holYear()}</span>
+          <button class="btn icon ghost" data-holyear="1" aria-label="Năm sau" style="flex:0 0 30px;width:30px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9 5l7 7-7 7"/></svg></button>
+        </div></div>
       <div style="padding:6px 0 0">
-        ${state.holidays.slice().sort((a, b) => a.date.localeCompare(b.date)).map(h => `<div class="seti">
+        ${state.holidays.map(h => ({ h, ds: holidayDates(h, holYear()) }))
+      .sort((a, b) => (a.ds[0] || "").localeCompare(b.ds[0] || ""))
+      .map(({ h, ds }) => `<div class="seti">
           <i class="swatch" style="background:var(--ot);width:14px;height:14px"></i>
           <div><div class="nm">${esc(h.name || "Ngày lễ")}</div>
-          <div class="mt num">${dateVN(parseISO(h.date))}</div></div>
+          <div class="mt">${holRuleText(h)}</div>
+          <div class="mt num" style="color:var(--ot)">${h.date ? holRangeText(ds) : `Năm ${holYear()}: ${holRangeText(ds)}`}</div></div>
           <div class="acts"><button class="btn danger" data-delhol="${h.id}">Xoá</button></div>
         </div>`).join("") || `<div class="empty"><b>Chưa khai ngày lễ nào.</b>Nhiệm vụ rơi vào ngày lễ sẽ bị tính như ngày thường.</div>`}
         <div class="addrow">
-          <input id="nhDate" type="date" value="${iso(state.cursor)}">
-          <input id="nhName" placeholder="Tên ngày lễ" style="flex:1;min-width:150px">
-          <button class="btn primary" id="nhAdd">Thêm ngày lễ</button>
-          <button class="btn" id="nhFill">Điền lễ dương lịch ${state.cursor.getFullYear()}</button>
+          <select id="nhKind" aria-label="Kiểu ngày lễ">
+            <option value="md">Hằng năm, dương lịch</option>
+            <option value="lunar">Hằng năm, âm lịch</option>
+            <option value="once">Một ngày cụ thể</option>
+          </select>
+          <input id="nhDate" type="date" value="${iso(state.cursor)}" aria-label="Ngày">
+          <input id="nhLD" class="hide" type="number" min="1" max="30" placeholder="Ngày âm" aria-label="Ngày âm" style="width:96px">
+          <input id="nhLM" class="hide" type="number" min="1" max="12" placeholder="Tháng âm" aria-label="Tháng âm" style="width:96px">
+          <input id="nhSpan" type="number" min="1" max="10" value="1" title="Số ngày nghỉ" aria-label="Số ngày nghỉ" style="width:72px">
+          <input id="nhName" placeholder="Tên ngày lễ" style="flex:1;min-width:140px">
+          <button class="btn primary" id="nhAdd">Thêm</button>
         </div>
-        <div class="note-box" style="margin:0 14px 14px">
-          Nút điền sẵn chỉ thêm được các ngày cố định theo dương lịch.
-          Tết Nguyên đán và Giỗ Tổ Hùng Vương tính theo âm lịch nên bạn tự thêm tay.
+        <div class="note-box" style="margin:0 14px 14px;display:flex;flex-direction:column;gap:10px;align-items:flex-start">
+          <span>Quy tắc hằng năm tự áp cho mọi năm, kể cả lễ âm lịch: trang tự đổi sang ngày dương của từng năm.
+          Bấm mũi tên ở đầu thẻ để xem trước ngày nghỉ của năm khác. Ô số là số ngày nghỉ liên tiếp.</span>
+          <button class="btn" id="nhFill">Thêm các ngày lễ Việt Nam cho mọi năm</button>
         </div>
       </div>
     </div>
@@ -2242,6 +2385,9 @@ $("#themeBtn").onclick = () => {
 document.addEventListener("click", e => {
   if (swallowClick) { swallowClick = false; return; }   // vừa kéo xong, bỏ qua cú click theo sau
 
+  const hy = e.target.closest("[data-holyear]");
+  if (hy) { state.holYear = holYear() + Number(hy.dataset.holyear); render(); return; }
+
   const go = e.target.closest("[data-go]");
   if (go) {
     state.cursor = parseISO(go.dataset.go);
@@ -2314,17 +2460,27 @@ document.addEventListener("click", e => {
       break;
     }
     case "nhAdd": {
-      const d = $("#nhDate").value; if (!d) return $("#nhDate").focus();
-      if (holidayOn(d)) return;
-      put("holidays", { date: d, name: $("#nhName").value.trim() || "Ngày lễ" });
+      const kind = $("#nhKind").value, name = $("#nhName").value.trim() || "Ngày lễ";
+      const span = Math.max(1, Math.min(10, Number($("#nhSpan").value) || 1));
+      let rule;
+      if (kind === "lunar") {
+        const ld = Number($("#nhLD").value), lm = Number($("#nhLM").value);
+        if (!(ld >= 1 && ld <= 30)) return $("#nhLD").focus();
+        if (!(lm >= 1 && lm <= 12)) return $("#nhLM").focus();
+        rule = { lunar: `${pad(lm)}-${pad(ld)}`, name, span };
+      } else {
+        const d = $("#nhDate").value; if (!d) return $("#nhDate").focus();
+        rule = kind === "md" ? { md: d.slice(5), name, span } : { date: d, name, span };
+      }
+      put("holidays", rule);
       break;
     }
     case "nhFill": {
-      // Chỉ các ngày lễ cố định theo dương lịch; lễ âm lịch phải thêm tay.
-      const y = state.cursor.getFullYear();
-      [["01-01", "Tết Dương lịch"], ["04-30", "Ngày Giải phóng miền Nam"],
-      ["05-01", "Ngày Quốc tế Lao động"], ["09-02", "Quốc khánh"]]
-        .forEach(([md, name]) => { const d = `${y}-${md}`; if (!holidayOn(d)) put("holidays", { date: d, name }); });
+      // Bản cũ điền ngày lễ dương lịch cho riêng một năm: gỡ đi, thay bằng quy tắc hằng năm.
+      state.holidays.filter(h => h.date && HOLIDAY_VN.some(r => r.md === h.date.slice(5) && r.name === h.name))
+        .forEach(h => drop("holidays", h.id));
+      const same = (a, b) => (a.md || "") === (b.md || "") && (a.lunar || "") === (b.lunar || "");
+      HOLIDAY_VN.forEach(r => { if (!state.holidays.some(h => same(h, r))) put("holidays", Object.assign({}, r)); });
       break;
     }
     case "nlAdd": {
@@ -2381,6 +2537,14 @@ document.addEventListener("click", e => {
 });
 
 document.addEventListener("change", e => {
+  // Kiểu ngày lễ: âm lịch thì nhập ngày và tháng âm, còn lại chọn ngày dương.
+  if (e.target.id === "nhKind") {
+    const lunar = e.target.value === "lunar";
+    $("#nhDate").classList.toggle("hide", lunar);
+    $("#nhLD").classList.toggle("hide", !lunar);
+    $("#nhLM").classList.toggle("hide", !lunar);
+    return;
+  }
   // Ô phần trăm trong Thiết lập: nhập 150 thì lưu thành hệ số 1,5.
   if (e.target.classList && e.target.classList.contains("pct")) {
     const c = co(e.target.dataset.co); if (!c) return;
